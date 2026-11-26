@@ -1,6 +1,10 @@
 # Non-root container image specific to this fork (Dockerfile.nonroot + docker-bake.hcl).
 # Separate file from release.yml/ci.yml: upstream merges never touch it.
 #
+# Multi-arch (linux/amd64 + linux/arm64, e.g. Apple Silicon Mac mini running k3s),
+# each architecture built natively on its own runner (no QEMU), then merged into a
+# single manifest list.
+#
 # Published to ghcr.io/<owner>/<repo>:
 #   nonroot            latest build from main
 #   nonroot-<sha>      immutable tag per commit
@@ -16,11 +20,6 @@ on:
       - "docs/**"
       - "screenshots/**"
   workflow_dispatch:
-    inputs:
-      arm64:
-        description: "Also build linux/arm64 (slow: QEMU emulation)"
-        type: boolean
-        default: false
 
 concurrency:
   group: fork-image-${{ github.ref }}
@@ -30,8 +29,15 @@ permissions:
   contents: read
 
 jobs:
-  image:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-latest }
+          # Native arm64 runner (free for public repositories).
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -39,8 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
-        if: inputs.arm64
+      - name: Image name (lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -52,7 +59,79 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
+
+      # Pushed by digest only (no tag); the merge job assembles the tags.
+      - uses: docker/bake-action@v6
+        id: bake
+        with:
+          source: .
+          files: |
+            ./docker-bake.hcl
+            ${{ steps.meta.outputs.bake-file-labels }}
+          targets: nonroot
+          set: |
+            *.platform=${{ matrix.platform }}
+            base.args.ARTEX_VERSION=${{ github.ref_name }}-${{ github.sha }}
+            *.cache-from=type=gha,scope=fork-image-${{ matrix.arch }}
+            *.cache-to=type=gha,scope=fork-image-${{ matrix.arch }},mode=max
+            nonroot.output=type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          METADATA: ${{ steps.bake.outputs.metadata }}
+        run: |
+          digest="$(jq -r '.nonroot["containerimage.digest"]' <<<"$METADATA")"
+          test -n "$digest" && test "$digest" != "null"
+          echo "DIGEST=$digest" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+      - name: Smoke test on native ${{ matrix.arch }} (non-root user, binary starts)
+        run: |
+          img="${IMAGE}@${DIGEST}"
+          docker pull "$img"
+          test "$(docker run --rm --entrypoint uname "$img" -m)" = "$(uname -m)"
+          uid="$(docker run --rm --entrypoint id "$img" -u)"
+          echo "uid=$uid"
+          test "$uid" != "0"
+          docker run --rm --entrypoint /app/artex "$img" -h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Image name (lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
           flavor: |
             latest=false
           tags: |
@@ -60,25 +139,12 @@ jobs:
             type=sha,prefix=nonroot-,format=short
             type=ref,event=tag,prefix=nonroot-
 
-      - uses: docker/bake-action@v6
-        with:
-          source: .
-          files: |
-            ./docker-bake.hcl
-            ${{ steps.meta.outputs.bake-file }}
-          targets: nonroot
-          push: true
-          set: |
-            *.platform=${{ inputs.arm64 && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-            base.args.ARTEX_VERSION=${{ github.ref_name }}-${{ github.sha }}
-            *.cache-from=type=gha,scope=fork-image
-            *.cache-to=type=gha,scope=fork-image,mode=max
-
-      - name: Smoke test (non-root user, binary starts)
+      - name: Create multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          img="ghcr.io/${GITHUB_REPOSITORY,,}:nonroot-${GITHUB_SHA::7}"
-          docker pull --platform linux/amd64 "$img"
-          uid="$(docker run --rm --entrypoint id "$img" -u)"
-          echo "uid=$uid"
-          test "$uid" != "0"
-          docker run --rm --entrypoint /app/artex "$img" -h
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<<"$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "${IMAGE}:nonroot-${GITHUB_SHA::7}"

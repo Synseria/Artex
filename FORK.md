@@ -30,7 +30,10 @@ Il suffit de les ajouter à `fr.json`. Le build de l'image (`fork-image.yml`) ne
   - `nonroot` : dernier build de `main` ;
   - `nonroot-<sha>` : un tag par commit ;
   - `nonroot-vX.Y.Z` : à chaque tag `v*`.
-- Lancement manuel possible (Actions → fork-image → Run workflow), avec option arm64.
+- Image **multi-arch** (`linux/amd64` + `linux/arm64`) : le même tag fonctionne sur un PC x86
+  et sur un Mac mini Apple Silicon. Chaque architecture est construite nativement (runner
+  `ubuntu-24.04-arm`, gratuit pour un repo public) puis testée (`uname -m`, UID ≠ 0, binaire OK).
+- Lancement manuel possible (Actions → fork-image → Run workflow).
 - Le paquet GHCR est privé par défaut : il faut le rendre public, ou utiliser un `imagePullSecret`.
 
 ### Compromis de sécurité du mode non-root
@@ -44,6 +47,14 @@ d'environnement (mot de passe Postgres, clés LLM). ARTEX signale ce mode « deg
 La compensation passe par le cluster : NetworkPolicy, namespace dédié, secrets limités au strict nécessaire.
 
 Sans `NET_RAW`, nmap bascule sur le scan TCP connect (`-sT`). Les scans SYN et arp-scan ne sont pas disponibles.
+
+### k3s sur Mac mini
+
+k3s ne tourne pas nativement sous macOS : il tourne dans une VM Linux arm64
+(OrbStack, Lima/Colima, UTM, Multipass…) ou sous Asahi Linux. Le nœud est donc
+`linux/arm64`, et l'image arm64 est choisie automatiquement.
+Prévoir ~4 Go de RAM pour la VM et une dizaine de Go de disque (image volumineuse :
+Chromium, templates nuclei, bbot). PostgreSQL (`postgres:16-alpine`) existe aussi en arm64.
 
 ### Exemple Kubernetes (extrait)
 
