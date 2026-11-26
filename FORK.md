@@ -88,3 +88,29 @@ doit rester inscriptible. Ce dossier contient la config et les dépendances bbot
 y monter un `emptyDir` les masquerait. Mieux vaut laisser `false`, car le système de fichiers
 racine est déjà en lecture seule pour l'UID 10001, sauf `/home/artex`, `/app/{data,keys,skills}` et `/tmp`.
 Le jeton de setup s'affiche dans les logs au premier démarrage : `kubectl logs ... | grep "Setup token"`.
+
+## 3. Synchronisation semi-automatique avec l'amont
+
+`.github/workflows/upstream-sync.yml` tourne chaque nuit, ou à la demande via Actions → upstream-sync → Run workflow :
+
+1. Si `BaaRai/ARTEX@main` a avancé, il fusionne l'amont dans la branche `sync/upstream`.
+   C'est un merge classique : vos commits (traduction, image non-root) sont conservés.
+2. Il ouvre une PR `sync/upstream → main`, ou la met à jour si elle existe déjà.
+   La PR liste les nouveaux commits amont et les clés françaises à traduire.
+3. Vous relisez et vous mergez. `fork-image.yml` reconstruit ensuite l'image.
+4. En cas de conflit, aucune PR n'est ouverte : une issue liste les fichiers à résoudre à la main.
+
+Prérequis : un secret `UPSTREAM_SYNC_TOKEN`, à créer dans Settings → Secrets and variables → Actions.
+
+Il s'agit d'un PAT *fine-grained*, limité à ce dépôt, avec ces permissions :
+
+- Contents : read/write ;
+- Pull requests : read/write ;
+- Issues : read/write ;
+- Workflows : read/write.
+
+Sans ce PAT, le workflow utilise `GITHUB_TOKEN`, avec trois limites :
+
+1. Il ne peut pas pousser un merge qui modifie `.github/workflows/`.
+2. La PR qu'il ouvre ne déclenche pas la CI.
+3. Il faut activer « Allow GitHub Actions to create and approve pull requests » dans Settings → Actions → General.
