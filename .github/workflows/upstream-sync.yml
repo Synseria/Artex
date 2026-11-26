@@ -1,0 +1,139 @@
+# Semi-automatic sync with the upstream repository (BaaRai/ARTEX), specific to this fork.
+#
+# Every day (or on demand: Actions → upstream-sync → Run workflow):
+#   1. fetch upstream main;
+#   2. if the fork is behind, merge it into the `sync/upstream` branch (a regular merge:
+#      the fork's commits — French translation, non-root image — are kept);
+#   3. open (or update) a PR `sync/upstream` → main, listing the new upstream commits
+#      and the French keys to translate;
+#   4. on a merge conflict: no PR, an issue lists the conflicting files.
+# You review the PR and merge it; the merge then rebuilds the image (fork-image.yml).
+#
+# Token: secret UPSTREAM_SYNC_TOKEN (fine-grained PAT on this repository only:
+# Contents, Pull requests, Issues = read/write, Workflows = read/write). Without it,
+# GITHUB_TOKEN is used, but (a) it cannot push a merge that touches .github/workflows/,
+# (b) the PR it opens does not trigger CI, and (c) "Allow GitHub Actions to create and
+# approve pull requests" must be enabled in Settings → Actions → General.
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  # gh must target this fork, never the parent: without GH_REPO, gh picks the base
+  # repository from the git remotes and a fork's parent wins (PRs/issues would be
+  # attempted on BaaRai/ARTEX, which the token rightly cannot reach).
+  GH_REPO: ${{ github.repository }}
+  UPSTREAM_REPO: BaaRai/ARTEX
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: sync/upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+
+      - name: Fetch upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git remote add artex-upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags artex-upstream "$UPSTREAM_BRANCH"
+          behind="$(git rev-list --count HEAD..FETCH_HEAD)"
+          echo "UPSTREAM_SHA=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
+          echo "BEHIND=$behind" >> "$GITHUB_ENV"
+          echo "Fork main is $behind commit(s) behind ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}"
+
+      - name: Merge upstream into the sync branch
+        id: merge
+        if: env.BEHIND != '0'
+        run: |
+          git checkout -B "$SYNC_BRANCH"
+          if git merge --no-edit -m "Merge ${UPSTREAM_REPO}@${UPSTREAM_SHA::7} into main" "$UPSTREAM_SHA"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report conflict as an issue
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+        run: |
+          title="Sync upstream : conflit de merge"
+          {
+            echo "La fusion automatique de \`${UPSTREAM_REPO}@${UPSTREAM_SHA::7}\` dans \`main\` est en conflit sur :"
+            echo
+            sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts.txt"
+            echo
+            echo "À résoudre à la main :"
+            echo
+            echo '```bash'
+            echo "git remote add upstream https://github.com/${UPSTREAM_REPO}.git  # une seule fois"
+            echo "git fetch upstream && git checkout main && git merge upstream/${UPSTREAM_BRANCH}"
+            echo '```'
+          } > "$RUNNER_TEMP/issue.md"
+          num="$(gh issue list --state open --search "in:title \"$title\"" --json number -q '.[0].number')"
+          if [ -n "$num" ]; then
+            gh issue edit "$num" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+          fi
+          echo "::warning::Merge conflict with upstream; see the issue."
+
+      - name: Push the sync branch and open / update the PR
+        if: steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+        run: |
+          git push --force origin "$SYNC_BRANCH"
+
+          missing="$(node web/scripts/check-i18n.mjs 2>&1 | grep '^fr.json: missing' | sed 's/^fr.json: missing /- /' || true)"
+          count="$(printf '%s' "$missing" | grep -c . || true)"
+          {
+            echo "Synchronisation automatique avec \`${UPSTREAM_REPO}@${UPSTREAM_SHA::7}\` (${BEHIND} commit(s))."
+            echo
+            echo "### Nouveaux commits amont"
+            git log --no-merges --format='- %h %s (%an)' "origin/main..${UPSTREAM_SHA}" | head -50
+            echo
+            echo "### Traduction française"
+            if [ "${count:-0}" -eq 0 ]; then
+              echo "Aucune nouvelle clé à traduire."
+            else
+              echo "${count} clé(s) absente(s) de \`web/src/i18n/locales/fr.json\` (affichées en anglais en attendant) :"
+              echo
+              echo "<details><summary>Liste</summary>"
+              echo
+              printf '%s\n' "$missing" | head -200
+              echo
+              echo "</details>"
+            fi
+            echo
+            echo "_Merger cette PR met à jour \`main\` et reconstruit l'image \`nonroot\`._"
+          } > "$RUNNER_TEMP/pr.md"
+
+          num="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number -q '.[0].number')"
+          if [ -n "$num" ]; then
+            gh pr edit "$num" --body-file "$RUNNER_TEMP/pr.md"
+          else
+            gh pr create --head "$SYNC_BRANCH" --base main \
+              --title "Sync upstream (${UPSTREAM_REPO})" --body-file "$RUNNER_TEMP/pr.md"
+          fi
