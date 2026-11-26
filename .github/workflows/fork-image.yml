@@ -1,11 +1,12 @@
-# Non-root container image specific to this fork (Dockerfile.nonroot + docker-bake.hcl).
+# Container images specific to this fork (docker-bake.hcl): `nonroot` (Dockerfile.nonroot) and `root`
+# (upstream Dockerfile as is, the only variant where agent isolation works).
 # Separate file from release.yml/ci.yml: upstream merges never touch it.
 #
 # Multi-arch (linux/amd64 + linux/arm64, e.g. Apple Silicon Mac mini running k3s),
 # each architecture built natively on its own runner (no QEMU), then merged into a
 # single manifest list.
 #
-# Published to ghcr.io/<owner>/<repo>:
+# Published to ghcr.io/<owner>/<repo>, for each variant (root-* tags mirror the nonroot-* ones):
 #   nonroot            latest build from main
 #   nonroot-<sha>      immutable tag per commit
 #   nonroot-<x>        when a fork-<x> tag is pushed, e.g. fork-v0.7.0 -> nonroot-v0.7.0
@@ -38,10 +39,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        variant: [nonroot, root]
+        arch: [amd64, arm64]
         include:
-          - { platform: linux/amd64, arch: amd64, runner: ubuntu-latest }
+          - { arch: amd64, platform: linux/amd64, runner: ubuntu-latest }
           # Native arm64 runner (free for public repositories).
-          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+          - { arch: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     permissions:
@@ -80,43 +83,46 @@ jobs:
           files: |
             ./docker-bake.hcl
             ${{ steps.meta.outputs.bake-file-labels }}
-          targets: nonroot
+          targets: ${{ matrix.variant }}
           set: |
             *.platform=${{ matrix.platform }}
-            base.args.ARTEX_VERSION=${{ env.ARTEX_VERSION }}
+            *.args.ARTEX_VERSION=${{ env.ARTEX_VERSION }}
             *.cache-from=type=gha,scope=fork-image-${{ matrix.arch }}
             *.cache-to=type=gha,scope=fork-image-${{ matrix.arch }},mode=max
-            nonroot.output=type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+            ${{ matrix.variant }}.output=type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
         env:
           METADATA: ${{ steps.bake.outputs.metadata }}
         run: |
-          digest="$(jq -r '.nonroot["containerimage.digest"]' <<<"$METADATA")"
+          digest="$(jq -r --arg v "${{ matrix.variant }}" '.[$v]["containerimage.digest"]' <<<"$METADATA")"
           test -n "$digest" && test "$digest" != "null"
           echo "DIGEST=$digest" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/digests"
           touch "$RUNNER_TEMP/digests/${digest#sha256:}"
 
-      - name: Smoke test on native ${{ matrix.arch }} (non-root user, binary starts)
+      - name: Smoke test on native ${{ matrix.arch }} (expected user, binary starts)
         run: |
           img="${IMAGE}@${DIGEST}"
           docker pull "$img"
           test "$(docker run --rm --entrypoint uname "$img" -m)" = "$(uname -m)"
           uid="$(docker run --rm --entrypoint id "$img" -u)"
           echo "uid=$uid"
-          test "$uid" != "0"
+          if [ "${{ matrix.variant }}" = root ]; then test "$uid" = "0"; else test "$uid" != "0"; fi
           docker run --rm --entrypoint /app/artex "$img" -h
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digest-${{ matrix.arch }}
+          name: digest-${{ matrix.variant }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
     needs: build
+    strategy:
+      matrix:
+        variant: [nonroot, root]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -126,7 +132,7 @@ jobs:
         id: kind
         run: |
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-          # nonroot-stable only for a plain official version (fork-vX.Y.Z, no suffix).
+          # <variant>-stable only for a plain official version (fork-vX.Y.Z, no suffix).
           if [[ "$GITHUB_REF" =~ ^refs/tags/fork-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "stable=true" >> "$GITHUB_OUTPUT"
           else
@@ -135,7 +141,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: digest-*
+          pattern: digest-${{ matrix.variant }}-*
           merge-multiple: true
           path: ${{ runner.temp }}/digests
 
@@ -154,10 +160,10 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=raw,value=nonroot,enable={{is_default_branch}}
-            type=sha,prefix=nonroot-,format=short
-            type=match,pattern=^fork-(.+)$,group=1,prefix=nonroot-
-            type=raw,value=nonroot-stable,enable=${{ steps.kind.outputs.stable == 'true' }}
+            type=raw,value=${{ matrix.variant }},enable={{is_default_branch}}
+            type=sha,prefix=${{ matrix.variant }}-,format=short
+            type=match,pattern=^fork-(.+)$,group=1,prefix=${{ matrix.variant }}-
+            type=raw,value=${{ matrix.variant }}-stable,enable=${{ steps.kind.outputs.stable == 'true' }}
 
       - name: Create multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
@@ -167,4 +173,4 @@ jobs:
             $(printf "${IMAGE}@sha256:%s " *)
 
       - name: Inspect
-        run: docker buildx imagetools inspect "${IMAGE}:nonroot-${GITHUB_SHA::7}"
+        run: docker buildx imagetools inspect "${IMAGE}:${{ matrix.variant }}-${GITHUB_SHA::7}"

@@ -25,6 +25,12 @@ target "base" {
 # Overridden in CI by docker/metadata-action (tags, OCI labels).
 target "docker-metadata-action" {}
 
+# Upstream image as is (server starts as root and drops agent processes to the executor UID):
+# the only variant where agent isolation works. Published as root-* tags.
+target "root" {
+  inherits = ["base", "docker-metadata-action"]
+}
+
 target "nonroot" {
   inherits   = ["docker-metadata-action"]
   context    = "."

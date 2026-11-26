@@ -34,6 +34,11 @@ Il suffit de les ajouter à `fr.json`. Le build de l'image (`fork-image.yml`) ne
 - Image **multi-arch** (`linux/amd64` + `linux/arm64`) : le même tag fonctionne sur un PC x86
   et sur un Mac mini Apple Silicon. Chaque architecture est construite nativement (runner
   `ubuntu-24.04-arm`, gratuit pour un repo public) puis testée (`uname -m`, UID ≠ 0, binaire OK).
+- Variante **`root`** (mêmes tags, préfixe `root-` : `root`, `root-<sha>`, `root-vX.Y.Z`, `root-stable`) :
+  l'image amont telle quelle, la seule où l'isolation des agents fonctionne. Sous Kubernetes, la lancer
+  dans un user namespace (`hostUsers: false`) avec seulement `SETUID`, `SETGID` et `CHOWN` : root dans le
+  pod n'y est pas root sur le nœud. Les agents perdent toute capacité au changement d'UID (pas de
+  capacités ambiantes) : `NET_RAW` sur le pod ne leur rend pas le scan SYN.
 - Lancement manuel possible (Actions → fork-image → Run workflow).
 - Le paquet GHCR est privé par défaut : il faut le rendre public, ou utiliser un `imagePullSecret`.
 
