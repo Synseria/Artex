@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+#
+# Non-root variant of the ARTEX image (specific to this fork).
+#
+# It extends the upstream image built from ./Dockerfile (bake context "artex-base",
+# see docker-bake.hcl) without modifying it, so upstream merges never conflict.
+#
+# Differences from the upstream image:
+#   - The server runs as UID 10001 (group 0, OpenShift style: also works with an arbitrary
+#     UID as long as the GID is 0), never as root.
+#   - The privilege drop (-exec-uid) is turned off: a non-root process cannot change
+#     identity. Agent processes (Bash, tools, MCP) therefore run with the server's
+#     identity and can read what it reads (keys/, DB password in the environment).
+#     ARTEX reports this "degraded" mode in its logs and in the UI.
+#   - Raw scans (nmap -sS, arp-scan…) need NET_RAW, which is not granted: nmap falls
+#     back to -sT (TCP connect scan).
+#
+# Writable paths: /app/data, /app/keys, /app/skills, /home/artex (HOME), /tmp.
+# The rest of the filesystem can be mounted read-only (readOnlyRootFilesystem).
+
+ARG BASE_IMAGE=artex-base
+FROM ${BASE_IMAGE}
+
+ARG ARTEX_UID=10001
+
+USER root
+RUN set -eux; \
+    mkdir -p /home/artex/.config /app/data /app/keys /app/skills; \
+    # bbot's config and dependencies were installed in root's HOME at build time.
+    if [ -d /root/.config/bbot ]; then cp -a /root/.config/bbot /home/artex/.config/bbot; fi; \
+    if [ -d /root/.bbot ]; then cp -a /root/.bbot /home/artex/.bbot; fi; \
+    chown -R "${ARTEX_UID}:0" /home/artex /app/data /app/keys /app/skills; \
+    chmod -R g=u /home/artex /app/data /app/keys /app/skills; \
+    chmod 0700 /app/keys
+
+ENV HOME=/home/artex \
+    XDG_CACHE_HOME=/home/artex/.cache
+
+USER ${ARTEX_UID}:0
+EXPOSE 8787 8788
+ENTRYPOINT ["/app/start.sh"]
+# -exec-uid=-1: explicit drop off (otherwise the server would log that it is not root).
+CMD ["-addr", ":8787", "-proxy", ":8788", "-exec-uid=-1"]
