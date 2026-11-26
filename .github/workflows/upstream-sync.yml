@@ -31,6 +31,10 @@ permissions:
   issues: write
 
 env:
+  # gh must target this fork, never the parent: without GH_REPO, gh picks the base
+  # repository from the git remotes and a fork's parent wins (PRs/issues would be
+  # attempted on BaaRai/ARTEX, which the token rightly cannot reach).
+  GH_REPO: ${{ github.repository }}
   UPSTREAM_REPO: BaaRai/ARTEX
   UPSTREAM_BRANCH: main
   SYNC_BRANCH: sync/upstream
@@ -49,8 +53,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          git remote add artex-upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags artex-upstream "$UPSTREAM_BRANCH"
           behind="$(git rev-list --count HEAD..FETCH_HEAD)"
           echo "UPSTREAM_SHA=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_ENV"
           echo "BEHIND=$behind" >> "$GITHUB_ENV"
