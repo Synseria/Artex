@@ -62,11 +62,11 @@ test("Chinese browser tags, fallback languages, invalid preferences and blocked 
   for (const tag of ["zh", "zh-CN", "zh-SG", "zh-Hans-CN", "ZH-cn"]) {
     assert.equal(load({ languages: [tag] }).api.locale, "zh-CN");
   }
-  assert.equal(load({ saved: "invalid", languages: ["fr-FR", "zh-CN"] }).api.locale, "zh-CN");
+  assert.equal(load({ saved: "invalid", languages: ["de-DE", "zh-CN"] }).api.locale, "zh-CN");
   assert.equal(load({ blocked: true, languages: ["zh-CN"] }).api.locale, "zh-CN");
   assert.equal(load({ languages: null, language: "zh-CN" }).api.locale, "zh-CN");
   assert.equal(load({ languages: [], language: "zh-CN" }).api.locale, "en");
-  assert.equal(load({ languages: ["fr-FR"] }).api.locale, "en");
+  assert.equal(load({ languages: ["de-DE"] }).api.locale, "en");
 });
 
 test("existing English and Turkish preferences and formatting are preserved", () => {
@@ -90,4 +90,14 @@ test("switching persists the existing storage key and reloads once", () => {
   const blocked = load({ blocked: true });
   assert.doesNotThrow(() => blocked.api.setLocale("zh-CN"));
   assert.equal(blocked.reloads(), 1);
+});
+
+test("French browser tags and preference", () => {
+  for (const tag of ["fr", "fr-FR", "fr-CA", "FR-be"]) {
+    assert.equal(load({ languages: [tag] }).api.locale, "fr");
+  }
+  const french = load({ saved: "fr", languages: ["zh-CN"] }).api;
+  assert.equal(french.locale, "fr");
+  assert.equal(french.intlLocale, "fr-FR");
+  assert.notEqual(french.t("Language"), "Language");
 });
