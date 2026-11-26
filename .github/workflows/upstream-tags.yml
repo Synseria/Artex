@@ -1,0 +1,152 @@
+# Builds the fork's image for each official upstream release (BaaRai/ARTEX vX.Y.Z tags).
+#
+# For an official tag vX.Y.Z not built yet, this workflow:
+#   1. starts from the exact upstream commit of vX.Y.Z;
+#   2. applies the fork's own changes (the "overlay": French translation, non-root
+#      image, fork workflows), i.e. the diff between main and the upstream commit
+#      main last merged;
+#   3. commits that and pushes the fork tag fork-vX.Y.Z, which triggers fork-image.yml
+#      → ghcr.io/<owner>/<repo>:nonroot-vX.Y.Z (+ nonroot-stable).
+# On an overlay conflict, an issue lists the files instead.
+#
+# Runs every day after upstream-sync (latest upstream tag only), or on demand with:
+#   - tag:    an upstream tag to (re)build, e.g. v0.7.0 (default: the latest one);
+#   - suffix: optional custom suffix → fork-v0.7.0-<suffix> / nonroot-v0.7.0-<suffix>,
+#             to rebuild a version with the current overlay (e.g. updated translation).
+#
+# Needs the UPSTREAM_SYNC_TOKEN secret (same PAT as upstream-sync.yml): a tag pushed
+# with GITHUB_TOKEN would not trigger fork-image.yml.
+name: upstream-tags
+
+on:
+  schedule:
+    - cron: "47 4 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (e.g. v0.7.0). Empty = latest upstream tag"
+        required: false
+        default: ""
+      suffix:
+        description: "Optional custom suffix (letters, digits, . _ -) → fork-<tag>-<suffix>"
+        required: false
+        default: ""
+
+concurrency:
+  group: upstream-tags
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  GH_REPO: ${{ github.repository }}
+  UPSTREAM_REPO: BaaRai/ARTEX
+  UPSTREAM_BRANCH: main
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the PAT
+        env:
+          HAS_PAT: ${{ secrets.UPSTREAM_SYNC_TOKEN != '' }}
+        run: |
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::error::UPSTREAM_SYNC_TOKEN is missing: a tag pushed with GITHUB_TOKEN would not trigger fork-image.yml."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+
+      - name: Fetch upstream branch and tags
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git remote add artex-upstream "https://github.com/${UPSTREAM_REPO}.git"
+          # Upstream tags go to their own namespace so they never mix with the fork's tags.
+          git fetch --no-tags artex-upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/artex-upstream/${UPSTREAM_BRANCH}" \
+            "+refs/tags/v*:refs/upstream-tags/v*"
+
+      - name: Pick the tag to build
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_SUFFIX: ${{ inputs.suffix }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$(git -c versionsort.suffix=- for-each-ref --sort=-v:refname \
+              --format='%(refname:strip=2)' refs/upstream-tags/ | head -1)"
+          fi
+          if [ -z "$tag" ] || ! git rev-parse -q --verify "refs/upstream-tags/${tag}^{commit}" >/dev/null; then
+            echo "::error::Upstream tag '${tag}' not found in ${UPSTREAM_REPO}"; exit 1
+          fi
+          if [ -n "$INPUT_SUFFIX" ] && ! [[ "$INPUT_SUFFIX" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid suffix '${INPUT_SUFFIX}' (allowed: letters, digits, . _ -)"; exit 1
+          fi
+          fork_tag="fork-${tag}${INPUT_SUFFIX:+-$INPUT_SUFFIX}"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "FORK_TAG=$fork_tag" >> "$GITHUB_ENV"
+          if git ls-remote --exit-code --tags origin "refs/tags/${fork_tag}" >/dev/null; then
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            echo "${fork_tag} already exists: nothing to do."
+          else
+            echo "SKIP=false" >> "$GITHUB_ENV"
+            echo "Building ${fork_tag} from ${UPSTREAM_REPO}@${tag}"
+          fi
+
+      - name: Apply the fork overlay on the upstream tag
+        id: overlay
+        if: env.SKIP == 'false'
+        run: |
+          base="$(git merge-base "artex-upstream/${UPSTREAM_BRANCH}" HEAD)"
+          echo "Overlay = diff ${base::7}..main (fork-only changes)"
+          git diff --binary "$base" HEAD > "$RUNNER_TEMP/overlay.patch"
+          git diff --stat "$base" HEAD
+          main_sha="$(git rev-parse --short HEAD)"
+          git checkout -q --detach "refs/upstream-tags/${TAG}"
+          if git apply --3way --index "$RUNNER_TEMP/overlay.patch"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -q -m "ARTEX ${TAG} + fork overlay (main@${main_sha})"
+          git tag -a "$FORK_TAG" -m "Upstream ${UPSTREAM_REPO}@${TAG} + fork overlay from main@${main_sha}"
+          git push origin "refs/tags/${FORK_TAG}"
+          {
+            echo "### ${FORK_TAG}"
+            echo "- Upstream: \`${UPSTREAM_REPO}@${TAG}\`"
+            echo "- Overlay: \`main@${main_sha}\`"
+            echo "- Image (built by fork-image): \`ghcr.io/${GITHUB_REPOSITORY,,}:nonroot-${FORK_TAG#fork-}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report overlay conflict as an issue
+        if: steps.overlay.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          title="Tag ${TAG} : conflit en appliquant les modifs du fork"
+          {
+            echo "Les modifications du fork ne s'appliquent pas proprement sur \`${UPSTREAM_REPO}@${TAG}\`."
+            echo "Fichiers en conflit :"
+            echo
+            sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts.txt"
+            echo
+            echo "L'image \`nonroot-${FORK_TAG#fork-}\` n'a pas été construite."
+          } > "$RUNNER_TEMP/issue.md"
+          num="$(gh issue list --state open --search "in:title \"$title\"" --json number -q '.[0].number')"
+          if [ -n "$num" ]; then
+            gh issue edit "$num" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+          fi
+          echo "::warning::Overlay conflict on ${TAG}; see the issue."
