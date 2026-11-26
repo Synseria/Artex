@@ -29,7 +29,8 @@ Il suffit de les ajouter à `fr.json`. Le build de l'image (`fork-image.yml`) ne
 - Publication sur `ghcr.io/synseria/artex` :
   - `nonroot` : dernier build de `main` ;
   - `nonroot-<sha>` : un tag par commit ;
-  - `nonroot-vX.Y.Z` : à chaque tag `v*`.
+  - `nonroot-vX.Y.Z` : version officielle de l'amont + modifs du fork (voir section 4) ;
+  - `nonroot-stable` : dernière version officielle construite.
 - Image **multi-arch** (`linux/amd64` + `linux/arm64`) : le même tag fonctionne sur un PC x86
   et sur un Mac mini Apple Silicon. Chaque architecture est construite nativement (runner
   `ubuntu-24.04-arm`, gratuit pour un repo public) puis testée (`uname -m`, UID ≠ 0, binaire OK).
@@ -114,3 +115,30 @@ Sans ce PAT, le workflow utilise `GITHUB_TOKEN`, avec trois limites :
 1. Il ne peut pas pousser un merge qui modifie `.github/workflows/`.
 2. La PR qu'il ouvre ne déclenche pas la CI.
 3. Il faut activer « Allow GitHub Actions to create and approve pull requests » dans Settings → Actions → General.
+
+## 4. Images basées sur les tags officiels
+
+Le workflow `.github/workflows/upstream-tags.yml` tourne chaque nuit, après la synchro, ou à la demande :
+
+1. Il repère le dernier tag officiel `vX.Y.Z` de `BaaRai/ARTEX`. S'il n'a pas encore été construit, il part du commit exact de ce tag.
+2. Il y applique les modifs du fork : traduction FR, image non-root et workflows.
+3. Il pousse le tag `fork-vX.Y.Z`. Ce push déclenche `fork-image.yml`, qui construit l'image `nonroot-vX.Y.Z` et met à jour `nonroot-stable`.
+4. En cas de conflit, rien n'est construit et une issue liste les fichiers concernés.
+
+Les tags du fork sont préfixés `fork-` : un tag `v*` déclencherait aussi le `release.yml` de l'amont.
+
+**Tag personnalisé.** Lancez Actions → upstream-tags → Run workflow avec :
+
+- `tag` : la version officielle, par exemple `v0.7.0` ;
+- `suffix` : le suffixe voulu, par exemple `fr2`.
+
+Le workflow crée alors `fork-v0.7.0-fr2`, ce qui donne l'image `nonroot-v0.7.0-fr2`. C'est utile pour reconstruire une version avec une traduction mise à jour.
+
+Tout tag `fork-<x>` poussé à la main produit de la même façon l'image `nonroot-<x>`.
+
+Sur le cluster, deux façons de choisir l'image :
+
+- un tag figé, comme `nonroot-v0.7.0`, pour ne changer de version que quand vous le décidez ;
+- `nonroot-stable`, pour suivre automatiquement la dernière version officielle.
+
+Ce workflow utilise le même secret `UPSTREAM_SYNC_TOKEN` : un tag poussé avec `GITHUB_TOKEN` ne déclencherait pas le build.
