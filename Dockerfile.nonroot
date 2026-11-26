@@ -15,8 +15,8 @@
 #   - Raw scans (nmap -sS, arp-scan…) need NET_RAW, which is not granted: nmap falls
 #     back to -sT (TCP connect scan).
 #
-# Writable paths: /app/data, /app/keys, /app/skills, /home/artex (HOME), /tmp.
-# The rest of the filesystem can be mounted read-only (readOnlyRootFilesystem).
+# Writable paths for the server: /app/data, /app/keys, /app/skills, /home/artex (HOME,
+# holds bbot's preinstalled config/deps: do not shadow it with an empty volume), /tmp.
 
 ARG BASE_IMAGE=artex-base
 FROM ${BASE_IMAGE}
